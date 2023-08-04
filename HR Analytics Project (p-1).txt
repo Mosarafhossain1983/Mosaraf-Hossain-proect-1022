@@ -1,0 +1,485 @@
+HR Analytics Project(p-1):
+
+XgBoost.ipynb
+
+import pandas as pd
+import numpy as np
+from sklearn.preprocessing import LabelEncoder
+import seaborn as sns
+
+import matplotlib.pyplot as plt
+%matplotlib inline
+
+pd.set_option('display.max_columns', None)
+
+ 
+train = pd.read_csv("train.csv")
+test  = pd.read_csv("test.csv")
+sub = pd.read_csv("sub.csv")
+
+ 
+train['target'].value_counts()
+
+ 
+0    15934
+1     2425
+Name: target, dtype: int64
+ 
+train['train_or_test']='train'
+test['train_or_test']='test'
+df=pd.concat([train,test])
+
+df.isnull().sum()
+
+ 
+city                          0
+city_development_index        0
+company_size               8830
+company_type               9369
+education_level             852
+enrolled_university         621
+enrollee_id                   0
+experience                  103
+gender                     7486
+last_new_job                671
+major_discipline           5231
+relevent_experience           0
+target                    15021
+train_or_test                 0
+training_hours                0
+dtype: int64
+Fill NA
+ 
+cols_with_missing = [col for col in df.columns
+                     if df[col].isnull().any()]
+for col in cols_with_missing:
+    df[col + '_was_missing'] = df[col].isnull()
+
+ 
+df.reset_index(inplace=True)
+
+ 
+def fast_mode(df, key_cols, value_col):
+    """
+    Calculate a column mode, by group, ignoring null values.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        DataFrame over which to calcualate the mode.
+    key_cols : list of str
+        Columns to groupby for calculation of mode.
+    value_col : str
+        Column for which to calculate the mode.
+
+    Return
+    ------
+    pandas.DataFrame
+        One row for the mode of value_col per key_cols group. If ties,
+        returns the one which is sorted first.
+    """
+    return (df.groupby(key_cols + [value_col]).size()
+              .to_frame('counts').reset_index()
+              .sort_values('counts', ascending=False)
+              .drop_duplicates(subset=key_cols)).drop(columns='counts')
+
+ 
+df.loc[df.company_size.isnull(), 'company_size'] = df.company_type.map(fast_mode(df, ['company_type'], 'company_size').set_index('company_type').company_size)
+
+df['experience'].fillna('new', inplace=True)
+
+ 
+df['gender'].fillna(df['gender'].mode()[0], inplace=True)
+df['enrolled_university'].fillna(df['enrolled_university'].mode()[0], inplace=True)
+df['education_level'].fillna(df['education_level'].mode()[0], inplace=True)
+df['major_discipline'].fillna(df['major_discipline'].mode()[0], inplace=True)
+
+df['company_type'].fillna(df['company_type'].mode()[0], inplace=True)
+df['company_size'].fillna(df['company_size'].mode()[0], inplace=True)
+df['last_new_job'].fillna(df['last_new_job'].mode()[0], inplace=True)
+
+Map the values
+ 
+df['enrolled_university_le'] = df['enrolled_university'].map({'no_enrollment': 0,
+                                                                   'Full time course': 1,
+                                                                   'Part time course': 2
+                                                                   })
+
+df['education_level_le'] = df['education_level'].map({'Primary School': 0,
+                                                            'High School': 1,
+                                                            'Graduate': 2,
+                                                            'Masters': 3,
+                                                            'Phd': 4})
+
+ 
+df['company_size_le'] = df['company_size'].map({'<10': 0,
+                                                      '10/49': 1,
+                                                      '50-99': 2,
+                                                      '100-500': 3,
+                                                      '500-999': 4,
+                                                      '1000-4999': 5,
+                                                      '5000-9999': 6,
+                                                      '10000+': 7})
+
+df['experience_le'] = df['experience'].map({'<1': 0,
+                                                  '1': 1,
+                                                  '2': 2,
+                                                  '3': 3,
+                                                  '4': 4,
+                                                  '5': 5,
+                                                  '6': 6,
+                                                  '7': 7,
+                                                  '8': 8,
+                                                  '9': 9,
+                                                  '10': 10,
+                                                  '11': 11,
+                                                  '12': 12,
+                                                  '13': 13,
+                                                  '14': 14,
+                                                  '15': 15,
+                                                  '16': 16,
+                                                  '17': 17,
+                                                  '18': 18,
+                                                  '19': 19,
+                                                  '20': 20,
+                                                  '>20': 21,
+                                                  'new' :22
+                                                 })
+
+
+df['last_new_job_le'] = df['last_new_job'].map({'never': 0,
+                                                      '1': 1,
+                                                      '2': 2,
+                                                      '3': 3,
+                                                      '4': 4,
+                                                      '>4': 5})
+
+ 
+train=df.loc[df.train_or_test.isin(['train'])]
+test=df.loc[df.train_or_test.isin(['test'])]
+train.drop(columns={'train_or_test'},axis=1,inplace=True)
+test.drop(columns={'train_or_test'},axis=1,inplace=True)
+
+
+Target Encoding
+
+def add_noise(series, noise_level):
+    return series * (1 + noise_level * np.random.randn(len(series)))
+
+def target_encode(trn_series=None,
+                  tst_series=None,
+                  target=None,
+                  min_samples_leaf=1,
+                  smoothing=1,
+                  noise_level=0):
+    """
+    Smoothing is computed like in the following paper by Daniele Micci-Barreca
+    https://kaggle2.blob.core.windows.net/forum-message-attachments/225952/7441/high%20cardinality%20categoricals.pdf
+    trn_series : training categorical feature as a pd.Series
+    tst_series : test categorical feature as a pd.Series
+    target : target data as a pd.Series
+    min_samples_leaf (int) : minimum samples to take category average into account
+    smoothing (int) : smoothing effect to balance categorical average vs prior  
+    """
+    assert len(trn_series) == len(target)
+    assert trn_series.name == tst_series.name
+    temp = pd.concat([trn_series, target], axis=1)
+    # Compute target mean
+    averages = temp.groupby(by=trn_series.name)[target.name].agg(["mean", "count"])
+    # Compute smoothing
+    smoothing = 1 / (1 + np.exp(-(averages["count"] - min_samples_leaf) / smoothing))
+    # Apply average function to all target data
+    prior = target.mean()
+    # The bigger the count the less full_avg is taken into account
+    averages[target.name] = prior * (1 - smoothing) + averages["mean"] * smoothing
+    averages.drop(["mean", "count"], axis=1, inplace=True)
+    # Apply averages to trn and tst series
+    ft_trn_series = pd.merge(
+        trn_series.to_frame(trn_series.name),
+        averages.reset_index().rename(columns={'index': target.name, target.name: 'average'}),
+        on=trn_series.name,
+        how='left')['average'].rename(trn_series.name + '_mean').fillna(prior)
+    # pd.merge does not keep the index so restore it
+    ft_trn_series.index = trn_series.index
+    ft_tst_series = pd.merge(
+        tst_series.to_frame(tst_series.name),
+        averages.reset_index().rename(columns={'index': target.name, target.name: 'average'}),
+        on=tst_series.name,
+        how='left')['average'].rename(trn_series.name + '_mean').fillna(prior)
+    # pd.merge does not keep the index so restore it
+    ft_tst_series.index = tst_series.index
+    return add_noise(ft_trn_series, noise_level), add_noise(ft_tst_series, noise_level)
+
+ 
+tr_g, te_g = target_encode(train["gender"],
+                         test["gender"],
+                         target=train.target,
+                         min_samples_leaf=100,
+                         smoothing=10,
+                         noise_level=0.01)
+train['gender_me']=tr_g
+test['gender_me']=te_g
+
+tr_g, te_g = target_encode(train["relevent_experience"],
+                         test["relevent_experience"],
+                         target=train.target,
+                         min_samples_leaf=100,
+                         smoothing=10,
+                         noise_level=0.01)
+train['relevent_experience_me']=tr_g
+test['relevent_experience_me']=te_g
+
+tr_g, te_g = target_encode(train["major_discipline"],
+                         test["major_discipline"],
+                         target=train.target,
+                         min_samples_leaf=100,
+                         smoothing=10,
+                         noise_level=0.01)
+train['major_discipline_me']=tr_g
+test['major_discipline_me']=te_g
+
+tr_g, te_g = target_encode(train["company_type"],
+                         test["company_type"],
+                         target=train.target,
+                         min_samples_leaf=100,
+                         smoothing=10,
+                         noise_level=0.01)
+train['company_type_me']=tr_g
+test['company_type_me']=te_g
+
+
+tr_g, te_g = target_encode(train["city"],
+                         test["city"],
+                         target=train.target,
+                         min_samples_leaf=100,
+                         smoothing=10,
+                         noise_level=0.01)
+train['city_me']=tr_g
+test['city_me']=te_g
+
+
+tr_g, te_g = target_encode(train["enrolled_university"],
+                         test["enrolled_university"],
+                         target=train.target,
+                         min_samples_leaf=100,
+                         smoothing=10,
+                         noise_level=0.01)
+train['enrolled_university_me']=tr_g
+test['enrolled_university_me']=te_g
+
+
+tr_g, te_g = target_encode(train["education_level"],
+                         test["education_level"],
+                         target=train.target,
+                         min_samples_leaf=100,
+                         smoothing=10,
+                         noise_level=0.01)
+train['education_level_me']=tr_g
+test['education_level_me']=te_g
+
+
+Modeling
+ 
+train.columns
+
+ 
+Index(['index', 'city', 'city_development_index', 'company_size',
+       'company_type', 'education_level', 'enrolled_university', 'enrollee_id',
+       'experience', 'gender', 'last_new_job', 'major_discipline',
+       'relevent_experience', 'target', 'training_hours',
+       'company_size_was_missing', 'company_type_was_missing',
+       'education_level_was_missing', 'enrolled_university_was_missing',
+       'experience_was_missing', 'gender_was_missing',
+       'last_new_job_was_missing', 'major_discipline_was_missing',
+       'target_was_missing', 'enrolled_university_le', 'education_level_le',
+       'company_size_le', 'experience_le', 'last_new_job_le', 'gender_me',
+       'relevent_experience_me', 'major_discipline_me', 'company_type_me',
+       'city_me', 'enrolled_university_me', 'education_level_me'],
+      dtype='object')
+ 
+x_train=train[['city_development_index',
+       'training_hours', 'gender_me',
+       'relevent_experience_me', 'enrolled_university_le',
+       'education_level_le', 'major_discipline_me', 'company_size_le',
+       'experience_le', 'company_type_me', 'last_new_job_le', 'city_me','company_size_was_missing',
+       'company_type_was_missing', 'education_level_was_missing',
+       'enrolled_university_was_missing', 'experience_was_missing',
+       'gender_was_missing', 'last_new_job_was_missing',
+       'major_discipline_was_missing', #'target_was_missing',
+               'enrolled_university_me', 'education_level_me']]
+
+y_train=train.loc[:,['target']]
+
+test=test[['city_development_index',
+       'training_hours', 'gender_me',
+       'relevent_experience_me', 'enrolled_university_le',
+       'education_level_le', 'major_discipline_me', 'company_size_le',
+       'experience_le', 'company_type_me', 'last_new_job_le', 'city_me','company_size_was_missing',
+       'company_type_was_missing', 'education_level_was_missing',
+       'enrolled_university_was_missing', 'experience_was_missing',
+       'gender_was_missing', 'last_new_job_was_missing',
+       'major_discipline_was_missing', #'target_was_missing',
+           'enrolled_university_me', 'education_level_me']]
+
+ 
+col=x_train.columns
+from sklearn.preprocessing import StandardScaler
+st=StandardScaler()
+st.fit(x_train)
+x_train=st.transform(x_train)
+test=st.transform(test)
+
+ 
+x_train=pd.DataFrame(x_train,columns=col)
+x_train1=x_train.copy()
+x_train[x_train<0]=0
+x_train1[x_train1>0]=0
+x_train1=x_train1.add_suffix('_neg')
+x_train=x_train.join(x_train1)
+
+ 
+test=pd.DataFrame(test,columns=col)
+test1=test.copy()
+test[test<0]=0
+test1[test1>0]=0
+test1=test1.add_suffix('_neg')
+test=test.join(test1)
+
+ 
+from sklearn.ensemble import RandomForestClassifier
+rf = RandomForestClassifier(n_estimators = 100, random_state = 50, verbose = 1, n_jobs = -1)
+rf.fit(x_train,y_train)
+pred=rf.predict_proba(test)[:,1]
+sub['target']=pred
+
+sub.to_csv('rfbaseline.csv',index=False)
+
+ 
+
+
+CatBoost
+ 
+x=x_train
+
+y=train.loc[:,['target']]
+
+ 
+from catboost import CatBoostClassifier,Pool
+from sklearn.model_selection import train_test_split
+
+ 
+x_train,x_valid,y_train,y_valid=train_test_split(x,y,train_size =0.8)
+
+ 
+train_pool=Pool(x, y)
+test_pool=Pool(test)
+
+ 
+weight=[1, 0.43]
+
+ 
+model = CatBoostClassifier(
+        iterations=5000,logging_level="Silent",early_stopping_rounds=500,
+    use_best_model=True,custom_loss=["AUC"], class_weights=weight,
+        eval_metric="AUC")
+
+ 
+model.fit(  x_train,y_train,
+        eval_set=(x_valid,y_valid),
+        plot=True
+        )
+
+MetricVisualizer(layout=Layout(align_self='stretch', height='500px'))
+ 
+<catboost.core.CatBoostClassifier at 0x194ed23c518>
+ 
+final_model = CatBoostClassifier(
+        iterations=5000,logging_level="Silent",class_weights=weight,
+        eval_metric="AUC")
+final_model.fit(x,y)
+
+ 
+<catboost.core.CatBoostClassifier at 0x194ef1e1a58>
+ 
+pred=final_model.predict_proba(test)[:,1]
+sub['target']=pred
+sub.to_csv('catboost1.csv',index=False)
+
+ 
+
+
+LGBM
+ 
+import lightgbm as lgb
+
+ 
+model = lgb.LGBMClassifier(n_estimators=10000, objective = 'binary',
+                                   class_weight = 'balanced', learning_rate = 0.05,
+                                   reg_alpha = 0.1, reg_lambda = 0.1,
+                                   subsample = 0.8, n_jobs = -1, random_state = 50)
+
+ 
+model.fit(x_train, y_train, eval_metric = 'auc',
+                  eval_set = [(x_valid, y_valid), (x_train, y_train)],
+                  early_stopping_rounds = 100, verbose = 200)
+
+
+Training until validation scores don't improve for 100 rounds
+Early stopping, best iteration is:
+[22]	training's auc: 0.754493	training's binary_logloss: 0.621338	valid_0's auc: 0.686057	valid_0's binary_logloss: 0.63814
+
+ 
+LGBMClassifier(boosting_type='gbdt', class_weight='balanced',
+               colsample_bytree=1.0, importance_type='split',
+               learning_rate=0.05, max_depth=-1, min_child_samples=20,
+               min_child_weight=0.001, min_split_gain=0.0, n_estimators=10000,
+               n_jobs=-1, num_leaves=31, objective='binary', random_state=50,
+               reg_alpha=0.1, reg_lambda=0.1, silent=True, subsample=0.8,
+               subsample_for_bin=200000, subsample_freq=0)
+ 
+#model.fit(x,y,eval_metric = 'auc')
+
+ 
+pred=model.predict_proba(test)[:,1]
+sub['target']=pred
+sub.to_csv('lgbm.csv',index=False)
+
+ 
+
+
+XGBOOST
+ 
+from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import train_test_split
+from sklearn import metrics
+from sklearn.metrics import f1_score, roc_auc_score
+from sklearn.linear_model import LogisticRegression
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import GridSearchCV
+from sklearn.neural_network import MLPClassifier
+import xgboost as xgb
+from xgboost import XGBClassifier
+import pandas as pd
+import matplotlib.pyplot as plt
+from collections import Counter
+import time
+
+ 
+xgb=XGBClassifier(base_score=0.5, booster='gbtree', colsample_bylevel=1, colsample_bytree=0.8, gamma=1.5, learning_rate=0.05, max_delta_step=0, max_depth=3, min_child_weight=7, missing=None, n_estimators=200, n_jobs=-1, nthread=None, objective='binary:logistic', random_state=0, reg_alpha=0, reg_lambda=1, scale_pos_weight=1, seed=None, silent=True, subsample=0.6)
+
+ 
+xgb.fit(x,y)
+
+ 
+XGBClassifier(base_score=0.5, booster='gbtree', colsample_bylevel=1,
+              colsample_bynode=1, colsample_bytree=0.8, gamma=1.5,
+              learning_rate=0.05, max_delta_step=0, max_depth=3,
+              min_child_weight=7, missing=None, n_estimators=200, n_jobs=-1,
+              nthread=None, objective='binary:logistic', random_state=0,
+              reg_alpha=0, reg_lambda=1, scale_pos_weight=1, seed=None,
+              silent=True, subsample=0.6, verbosity=1)
+ 
+pred=xgb.predict_proba(test)[:,1]
+sub['target']=pred
+sub.to_csv('xgb.csv',index=False)
+

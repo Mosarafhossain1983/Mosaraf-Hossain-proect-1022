@@ -1,0 +1,66 @@
+Baseball Case Study:
+
+
+Python Code:
+
+import pandas as pd
+
+# Load the baseball dataset (replace 'data.csv' with the actual filename)
+data = pd.read_csv('data.csv')
+
+# Define the function to calculate player performance metric
+def calculate_performance(row):
+    # You can use a formula that considers multiple factors to determine performance
+    # For this example, we'll use a simple weighted average of batting average and RBIs
+    batting_avg_weight = 0.6
+    rbis_weight = 0.4
+
+    performance_score = (
+        row['Batting Average'] * batting_avg_weight +
+        row['RBIs'] * rbis_weight
+    )
+
+    return performance_score
+
+# Add a new column 'Performance' to the DataFrame
+data['Performance'] = data.apply(calculate_performance, axis=1)
+
+# Sort the data by performance in descending order to find the top performers
+data_sorted = data.sort_values(by='Performance', ascending=False)
+
+# Print the top 10 players based on performance
+print("Top 10 Players Based on Performance:")
+print(data_sorted.head(10))
+
+/* AVOCADO CODE */
+
+import pandas as pd
+import seaborn as sns
+import matplotlib.pyplot as plt
+
+import os
+print(os.listdir("../input"))
+
+from matplotlib import pyplot
+
+from sklearn import metrics
+from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import LabelEncoder
+
+import warnings                                                                 
+warnings.filterwarnings('ignore') 
+
+# allow plots to appear directly in the notebook
+%matplotlib inline
+
+from subprocess import check_output
+from sklearn.metrics import accuracy_score
+from sklearn.metrics import confusion_matrix
+from sklearn.model_selection import train_test_split
+
+from sklearn.linear_model import LogisticRegression
+from sklearn.linear_model import LinearRegression
+
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.ensemble import RandomForestRegressor
+
